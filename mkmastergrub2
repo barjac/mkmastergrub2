@@ -1,0 +1,186 @@
+#!/bin/bash
+# mkmastergrub2
+
+################################################################
+# Note: Currently only for UEFI mode.
+#
+# This script creates a basic Master grub2 install to chainload  
+# into any systems on a machine.
+# Further menu entries may be added manually to master-grub's 
+# grub.cfg at any time.
+# A small (20MB) ext2 (native linux) partition labelled 
+# "master-grub" must be prepared and formatted before running
+#  this script.
+# Run as root:
+# ./mkmastergrub2
+################################################################
+# Changelog
+# 23/06/2016 Added ability to put manually written entries in 
+#            custom.cfg that will not be overwritten on re-runs
+#            of script
+# 05/08/2015 Added startup.nsh to work around VBox nvram bug.
+#            Use correct path for *buntu installations.
+################################################################
+
+prep() {
+# Check we are root
+(((UID))) && { echo "You must be root to run $0"; exit 0; }
+# Check it's a UEFI system
+[[ -d /sys/firmware/efi ]] || { echo "Not a UEFI booted system"; exit 1; }
+# Get ESP device
+if ! mountpoint -q /boot/EFI; then
+echo "ESP not mounted - please reboot and run again"
+exit 1
+else
+esp=$(df -h /boot/EFI |(read; awk '{print $1; exit}'))
+umount $esp || { echo "Failed to unmount ESP in prep"; exit 1; }
+fi
+umounts
+}
+
+umounts() {
+# Unmount any existing temporary mount points
+if mountpoint -q /master-grub/EFI; then
+  umount /master-grub/EFI || { echo "Failed to unmount old EFI mount please reboot and run again"; exit 1; }
+fi
+if mountpoint -q /master-grub; then
+  umount /master-grub || { echo "Failed to unmount old mount please reboot and run again"; exit 1; }
+fi
+}
+
+probed() {
+os-prober > probe.tmp
+corepath="/boot/grub2/x86_64-efi/core.efi"
+while read line; do
+ostyp=$(echo $line | cut -d: -f4)
+if [[ "$ostyp" = "linux" ]]; then
+dev=$(echo $line | cut -d: -f1)
+name=$(echo $line | cut -d: -f2 |cut -d'(' -f1)" on "$dev
+uuid=$(blkid $dev -s UUID | cut -d= -f2)
+if echo $name|grep -q buntu; then
+corepath="/boot/grub/x86_64-efi/core.efi"
+fi
+echo "menuentry '$name' {"
+echo "search --no-floppy --fs-uuid --set=root $uuid"
+echo "chainloader $corepath"
+echo "}"
+echo
+elif [[ "$ostyp" = "Windows" ]]; then
+dev=$(echo $line | cut -d@ -f1)
+name="Windows on $dev"
+uuid=$(blkid $dev -s UUID | cut -d= -f2)
+echo "menuentry '$name' {"
+echo "search --no-floppy --fs-uuid --set=root $uuid"
+echo "chainloader /EFI/Microsoft/Boot/bootmgfw.efi"
+echo "}"
+echo
+fi
+done < probe.tmp
+rm -f probe.tmp
+}
+
+thisone() {
+dev=$(df -h /boot |(read; awk '{print $1; exit}'))
+name=$(cat /etc/os-release | grep PRETTY_NAME |cut -d= -f2|cut -d'"' -f2)
+uuid=$(blkid $dev -s UUID | cut -d= -f2)
+echo "menuentry '$name on $dev' {"
+echo "search --no-floppy --fs-uuid --set=root $uuid"
+echo "chainloader /boot/grub2/x86_64-efi/core.efi"
+echo "}"
+echo
+}
+
+startupnsh() {
+if dmidecode|grep -q vboxVer; then
+cat > /master-grub/EFI/startup.nsh <<EOF
+fs0:
+if not exist EFI then
+fs1:
+endif
+cd EFI/master
+grubx64.efi
+EOF
+fi
+}
+
+cfg_header() {
+cat> /master-grub/grub2/grub.cfg<<EOF
+set default="0"
+set timeout=10
+
+if loadfont unicode ; then
+  set gfxmode=1024x768x32
+  insmod all_video
+  insmod gfxterm
+  set locale_dir=$prefix/locale
+  set lang=en_GB
+  insmod gettext
+fi
+terminal_output gfxterm
+insmod part_gpt
+insmod ext2
+
+# Theme
+insmod gfxmenu
+loadfont /grub2/themes/maggy/MageiaLogo-Bold-16.pf2
+loadfont /grub2/themes/maggy/MageiaLogo-Bold-20.pf2
+loadfont /grub2/themes/maggy/MageiaLogo-Bold-28.pf2
+loadfont /grub2/themes/maggy/MageiaLogo-Regular-20.pf2
+insmod png
+set theme=/grub2/themes/maggy/theme.txt
+export theme
+
+EOF
+}
+
+cfg_footer() {
+cat>> /master-grub/grub2/grub.cfg<<EOF
+
+if [ -f  /grub2/custom.cfg ]; then
+  source /grub2/custom.cfg
+fi
+
+EOF
+}
+
+cleanup() {
+# Unmount ESP and master-grub
+umounts
+# Re-mount ESP
+mount -t vfat $esp /boot/EFI || { echo "Failed to re-mount ESP in cleanup"; exit 1; }
+# Delete master-grub mount point
+rm -r /master-grub || { echo "Failed to delete /master-grub mount point in cleanup"; exit 1; }
+}
+
+# OK let's get started ------------------------
+prep
+# Create temporary mount point for master-grub partition
+mkdir -p /master-grub || { echo "Failed to create master-grub mount point"; exit 1; }
+# Mount master-grub partition on /master-grub
+mount -L master-grub /master-grub || { echo "Failed to mount master-grub"; exit 1; }
+# Create mount point for ESP on master-grub
+mkdir -p /master-grub/EFI || { echo "Failed to create master-grub/EFI mount point"; exit 1; }
+# Mount ESP on master-grub
+mount -t vfat $esp /master-grub/EFI || { echo "Failed to mount ESP in master-grub"; exit 1; }
+# Install grub2 to master-grub
+grub2-install --boot-directory=/master-grub --bootloader-id=master || { echo "Failed to install grub"; exit 1; }
+# Copy some files
+cp -r /boot/grub2/fonts /master-grub/grub2/ || { echo "Failed to copy over fonts"; exit 1; }
+cp -r /boot/grub2/themes /master-grub/grub2/ || { echo "Failed to copy over theme"; exit 1; }
+# Change menu title
+sed -i 's/"Mageia Grub 2 Menu"/"Master Grub2"/' $(find /master-grub/grub2 -name theme.txt)
+# Add startup.nsh if this is a VBox install to workaround bug that loses nvram
+startupnsh
+# Back up any existing grub.cfg
+[[ -f /master-grub/grub2/grub.cfg ]] && mv /master-grub/grub2/grub.cfg /master-grub/grub2/grub.cfg~
+# Write initial grub.cfg template to master-grub
+cfg_header
+# Create new top entry for current system in grub.cfg
+thisone >> /master-grub/grub2/grub.cfg
+# Create new probed entries for grub.cfg
+probed >> /master-grub/grub2/grub.cfg
+# Add custom.cfg capability
+cfg_footer
+# Tidy up and re-mount ESP
+cleanup
+echo "Install complete :)"

@@ -168,7 +168,7 @@ grub2-install --boot-directory=/master-grub --bootloader-id=master || { echo "Fa
 cp -r /boot/grub2/fonts /master-grub/grub2/ || { echo "Failed to copy over fonts"; exit 1; }
 cp -r /boot/grub2/themes /master-grub/grub2/ || { echo "Failed to copy over theme"; exit 1; }
 # Change menu title
-sed -i 's/"Mageia Grub 2 Menu"/"Master Grub2"/' $(find /master-grub/grub2 -name theme.txt)
+sed -i 's/"Mageia Boot Menu"/"Master Boot Menu"/' $(find /master-grub/grub2 -name theme.txt)
 # Add startup.nsh if this is a VBox install to workaround bug that loses nvram
 startupnsh
 # Back up any existing grub.cfg

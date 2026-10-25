@@ -15,6 +15,12 @@
 # ./mkmastergrub2
 ################################################################
 # Changelog
+# 25/10/2026 Fixed locale_dir ($prefix was expanded by bash), *buntu
+#            core.efi path carrying over to later entries, and the
+#            exit status when not run as root. Skip (with a warning)
+#            systems that have no core.efi to chainload. Plain UUIDs
+#            from blkid, temporary file from mktemp, ESP re-mounted
+#            with its fstab options.
 # 23/06/2016 Added ability to put manually written entries in 
 #            custom.cfg that will not be overwritten on re-runs
 #            of script
@@ -24,7 +30,7 @@
 
 prep() {
 # Check we are root
-(((UID))) && { echo "You must be root to run $0"; exit 0; }
+(((UID))) && { echo "You must be root to run $0"; exit 1; }
 # Check it's a UEFI system
 [[ -d /sys/firmware/efi ]] || { echo "Not a UEFI booted system"; exit 1; }
 # Get ESP device
@@ -48,17 +54,39 @@ if mountpoint -q /master-grub; then
 fi
 }
 
+# has_core DEV PATH -> true if PATH exists on DEV (mounted read-only on a
+# temporary mount point unless it is mounted already)
+has_core() {
+local mnt tmp found=1
+mnt=$(findmnt -rno TARGET -S "$1" | head -1)
+if [[ -z $mnt ]]; then
+  tmp=$(mktemp -d) || return 0
+  mount -o ro "$1" "$tmp" 2>/dev/null || { rmdir "$tmp"; return 0; }
+  mnt=$tmp
+fi
+[[ -f $mnt$2 ]] && found=0
+if [[ -n $tmp ]]; then
+  umount "$tmp"; rmdir "$tmp"
+fi
+return $found
+}
+
 probed() {
-os-prober > probe.tmp
-corepath="/boot/grub2/x86_64-efi/core.efi"
+probe=$(mktemp) || { echo "Failed to create a temporary file" >&2; exit 1; }
+os-prober > "$probe"
 while read line; do
 ostyp=$(echo $line | cut -d: -f4)
 if [[ "$ostyp" = "linux" ]]; then
 dev=$(echo $line | cut -d: -f1)
 name=$(echo $line | cut -d: -f2 |cut -d'(' -f1)" on "$dev
-uuid=$(blkid $dev -s UUID | cut -d= -f2)
+uuid=$(blkid -s UUID -o value $dev)
+corepath="/boot/grub2/x86_64-efi/core.efi"
 if echo $name|grep -q buntu; then
 corepath="/boot/grub/x86_64-efi/core.efi"
+fi
+if ! has_core $dev $corepath; then
+echo "Skipping $name: it has no $corepath to chainload" >&2
+continue
 fi
 echo "menuentry '$name' {"
 echo "search --no-floppy --fs-uuid --set=root $uuid"
@@ -68,21 +96,21 @@ echo
 elif [[ "$ostyp" = "Windows" ]]; then
 dev=$(echo $line | cut -d@ -f1)
 name="Windows on $dev"
-uuid=$(blkid $dev -s UUID | cut -d= -f2)
+uuid=$(blkid -s UUID -o value $dev)
 echo "menuentry '$name' {"
 echo "search --no-floppy --fs-uuid --set=root $uuid"
 echo "chainloader /EFI/Microsoft/Boot/bootmgfw.efi"
 echo "}"
 echo
 fi
-done < probe.tmp
-rm -f probe.tmp
+done < "$probe"
+rm -f "$probe"
 }
 
 thisone() {
 dev=$(df -h /boot |(read; awk '{print $1; exit}'))
 name=$(cat /etc/os-release | grep PRETTY_NAME |cut -d= -f2|cut -d'"' -f2)
-uuid=$(blkid $dev -s UUID | cut -d= -f2)
+uuid=$(blkid -s UUID -o value $dev)
 echo "menuentry '$name on $dev' {"
 echo "search --no-floppy --fs-uuid --set=root $uuid"
 echo "chainloader /boot/grub2/x86_64-efi/core.efi"
@@ -112,7 +140,7 @@ if loadfont unicode ; then
   set gfxmode=1024x768x32
   insmod all_video
   insmod gfxterm
-  set locale_dir=$prefix/locale
+  set locale_dir=\$prefix/locale
   set lang=en_GB
   insmod gettext
 fi
@@ -148,7 +176,7 @@ cleanup() {
 # Unmount ESP and master-grub
 umounts
 # Re-mount ESP
-mount -t vfat $esp /boot/EFI || { echo "Failed to re-mount ESP in cleanup"; exit 1; }
+mount /boot/EFI || { echo "Failed to re-mount ESP in cleanup"; exit 1; }
 # Delete master-grub mount point
 rm -r /master-grub || { echo "Failed to delete /master-grub mount point in cleanup"; exit 1; }
 }
